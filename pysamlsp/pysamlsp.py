@@ -4,7 +4,10 @@ import base64
 import zlib
 import uuid
 import urllib
-from sh import xmlsec1
+try:
+    from sh import xmlsec1
+except ImportError:
+    xmlsec1 = None
 from datetime import datetime
 from lxml import etree
 from lxml.builder import ElementMaker
@@ -60,7 +63,9 @@ class SAMLNameIDError(Exception):
   def __str__(self):
     return '%s: %s' % (self.__doc__, self._msg)
 
-class Pysamlsp(object):
+
+class BasePysamlsp(object):
+
   def __init__(self, config = {}):
     self.ID = uuid.uuid4().hex
     self.assertion_consumer_service_url = config.get(
@@ -70,16 +75,19 @@ class Pysamlsp(object):
     self.private_key = config.get('private_key') or ''
     self.sign_authnrequests = config.get('sign_authnrequests') or False
     self.certificate = config.get('certificate') or ''
+
   def samlp_maker(self):
     return ElementMaker(
       namespace='urn:oasis:names:tc:SAML:2.0:protocol',
       nsmap=dict(samlp='urn:oasis:names:tc:SAML:2.0:protocol'),
     )
+
   def saml_maker(self):
     return ElementMaker(
       namespace='urn:oasis:names:tc:SAML:2.0:assertion',
       nsmap=dict(saml='urn:oasis:names:tc:SAML:2.0:assertion'),
     )
+
   def authnrequest(self):
     authn_request = self.samlp_maker().AuthnRequest(
       ProtocolBinding = 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST',
@@ -101,23 +109,19 @@ class Pysamlsp(object):
     requested_authn_context.append(requested_authn_context_class_ref)
     authn_request.append(requested_authn_context)
     return authn_request
+
   def authnrequest_as_string(self):
     return etree.tostring(self.authnrequest())
+
   def authnrequest_to_sign(self):
     authnrequest_to_sign = self.authnrequest()
     authnrequest_to_sign.append(
       etree.fromstring(XML_SIGNATURE_FRAGMENT))
     return etree.tostring(authnrequest_to_sign)
+
   def authnrequest_signed(self):
-    tempfile = '/tmp/' + self.ID
-    with open(tempfile, 'w') as fh:
-      fh.write(self.authnrequest_to_sign())
-    signed = xmlsec1(
-      '--sign',
-      '--privkey-pem', self.private_key,
-      tempfile)
-    os.remove(tempfile)
-    return signed.stdout
+    raise NotImplementedError
+
   def redirect_for_idp(self):
     if self.sign_authnrequests:
       authnrequest = self.authnrequest_signed()
@@ -130,33 +134,21 @@ class Pysamlsp(object):
         [('SAMLRequest', gzip_and_base64encode(authnrequest))]
       )
     )
+
   def check_not_before_date(self, when):
     return datetime.strptime(when, '%Y-%m-%dT%H:%M:%SZ') < datetime.utcnow()
+
   def check_not_on_or_after_date(self, when):
     return datetime.strptime(when, '%Y-%m-%dT%H:%M:%SZ') >= datetime.utcnow()
+
   def response_as_xml(self, saml_response):
     parser = etree.XMLParser(remove_blank_text = True)
     response = etree.parse(StringIO(base64.b64decode(saml_response)), parser)
     return etree.tostring(response, pretty_print = True)
+
   def verify_signature(self, saml_response):
-    tempfile = '/tmp/' + self.ID
-    with open(tempfile, 'w') as fh:
-      fh.write(base64.b64decode(saml_response).strip())
-    try:
-      verified = xmlsec1(
-        '--verify',
-        '--pubkey-cert-pem', self.certificate,
-        '--store-references',
-        '--id-attr:ID', 'urn:oasis:names:tc:SAML:2.0:assertion:Assertion',
-        tempfile)
-    except:
-      raise
-    finally:
-      pass
-      #os.remove(tempfile)
-    if not (verified.exit_code == 0 and
-        verified.stderr.find('SignedInfo References (ok/all): 1/1') > 0):
-      raise SAMLValidationError('xmlsec1 error: %s' % verified.stderr)
+    raise NotImplementedError
+
   def user_is_valid(self, saml_response):
     response = etree.fromstring(base64.b64decode(saml_response).strip())
     try:
@@ -183,3 +175,38 @@ class Pysamlsp(object):
       raise SAMLConditionError('NotOnOrAfter condition not met')
     self.verify_signature(saml_response)
     return nameid.text.strip()
+
+
+if xmlsec1:
+
+
+    class Pysamlsp(BasePysamlsp):
+      def authnrequest_signed(self):
+        tempfile = '/tmp/' + self.ID
+        with open(tempfile, 'w') as fh:
+          fh.write(self.authnrequest_to_sign())
+        signed = xmlsec1(
+          '--sign',
+          '--privkey-pem', self.private_key,
+          tempfile)
+        os.remove(tempfile)
+        return signed.stdout
+      def verify_signature(self, saml_response):
+        tempfile = '/tmp/' + self.ID
+        with open(tempfile, 'w') as fh:
+          fh.write(base64.b64decode(saml_response).strip())
+        try:
+          verified = xmlsec1(
+            '--verify',
+            '--pubkey-cert-pem', self.certificate,
+            '--store-references',
+            '--id-attr:ID', 'urn:oasis:names:tc:SAML:2.0:assertion:Assertion',
+            tempfile)
+        except:
+          raise
+        finally:
+          pass
+          #os.remove(tempfile)
+        if not (verified.exit_code == 0 and
+            verified.stderr.find('SignedInfo References (ok/all): 1/1') > 0):
+          raise SAMLValidationError('xmlsec1 error: %s' % verified.stderr)
