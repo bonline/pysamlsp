@@ -17,7 +17,6 @@ setup(
   keywords = "SAML2 SSO single sign on service provider only, for use with a remote IdP.",
   packages = ['pysamlsp'],
   install_requires = [
-    'lxml',
     'sh'
   ],
   tests_require = [
